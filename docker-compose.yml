@@ -156,6 +156,10 @@ services:
       # so the web client emits https:// in its redirects instead of http://.
       # See docs/WEBCLIENT-POC.md.
       BC_WEBCLIENT_REQUIRE_SSL: ${BC_WEBCLIENT_REQUIRE_SSL:-}
+      # Public URL the tier advertises as PublicWebBaseUrl. The entrypoint reads
+      # this (defaulting to http://localhost:<port>/), so it has to be forwarded
+      # here or an external hostname can never be set. See docs/WEBCLIENT-POC.md.
+      BC_WEBCLIENT_PUBLIC_URL: ${BC_WEBCLIENT_PUBLIC_URL:-}
       SQL_SERVER: sql
       # .NET runtime tuning. Defaults are inherited from the entrypoint
       # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
