@@ -295,10 +295,17 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     if [ -n "$BC_AAD_APP_ID" ]; then
         [ -z "$BC_AAD_TENANT_ID" ] && { log_step "ERROR: BC_AAD_APP_ID needs BC_AAD_TENANT_ID"; exit 1; }
         WSFED="https://login.microsoftonline.com/$BC_AAD_TENANT_ID/wsfed?wa=wsignin1.0%26wtrealm=api://$BC_AAD_APP_ID"
+        # Where the tier fetches Entra's token-signing certificates. Empty is not a
+        # neutral default: the JWT handler then throws NavConfigurationException
+        # ("ADOpenIdMetadataLocation has a value that is not valid") while validating
+        # the signature, which surfaces to the browser as the generic "You cannot sign
+        # in due to a technical issue" and looks like a user-matching problem.
+        OIDMETA="https://login.microsoftonline.com/$BC_AAD_TENANT_ID/.well-known/openid-configuration"
         sed -i \
             -e "s|AppIdUri\" value=\"[^\"]*\"|AppIdUri\" value=\"api://$BC_AAD_APP_ID\"|" \
             -e "s|ValidAudiences\" value=\"[^\"]*\"|ValidAudiences\" value=\"$BC_AAD_APP_ID;https://api.businesscentral.dynamics.com\"|" \
             -e "s|WSFederationLoginEndpoint\" value=\"[^\"]*\"|WSFederationLoginEndpoint\" value=\"$WSFED\"|" \
+            -e "s|ADOpenIdMetadataLocation\" value=\"[^\"]*\"|ADOpenIdMetadataLocation\" value=\"$OIDMETA\"|" \
             -e "s|ExtendedSecurityTokenLifetime\" value=\"[^\"]*\"|ExtendedSecurityTokenLifetime\" value=\"24\"|" \
             -e "s|DisableTokenSigningCertificateValidation\" value=\"[^\"]*\"|DisableTokenSigningCertificateValidation\" value=\"true\"|" \
             "$CONFIG"
