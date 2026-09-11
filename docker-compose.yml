@@ -239,6 +239,10 @@ services:
       traefik.http.routers.bcweb.service: "bcweb"
       traefik.http.routers.bcweb.middlewares: "publichost"
       traefik.http.middlewares.publichost.headers.customrequestheaders.Host: "${BC_WEBCLIENT_PUBLIC_HOST:-}"
+      # The relay rewrites Origin to http://localhost:<port> as well, and BC's
+      # WebSocket middleware 403s any origin that is not PublicWebBaseUrl, which
+      # kills /csh. Restore it for the same reason Host is restored above.
+      traefik.http.middlewares.publichost.headers.customrequestheaders.Origin: "https://${BC_WEBCLIENT_PUBLIC_HOST:-}"
       traefik.http.services.bcweb.loadbalancer.server.port: "8080"
       traefik.http.services.bcweb.loadbalancer.server.scheme: "https"
       traefik.http.services.bcweb.loadbalancer.serverstransport: "bc-transport@file"
@@ -283,6 +287,9 @@ services:
       - --api.dashboard=true
       - --log.level=INFO
       - --accesslog
+      - --accesslog.format=json
+      - --accesslog.fields.headers.names.Origin=keep
+      - --accesslog.fields.headers.names.User-Agent=keep
 
 volumes:
   bc-artifacts:
