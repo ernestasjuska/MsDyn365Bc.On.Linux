@@ -94,8 +94,10 @@ services:
       - "${BC_API_PORT:-7052}:7052"
       - "${BC_MGMT_PORT:-7045}:7045"
       - "${BC_CLIENT_PORT:-7085}:7085"
-      # Web client (PoC, opt-in via BC_WEBCLIENT=1 — see docs/WEBCLIENT-POC.md)
-      - "${BC_WEBCLIENT_PORT:-8080}:8080"
+      # Web client (PoC, opt-in via BC_WEBCLIENT=1 — see docs/WEBCLIENT-POC.md).
+      # Published separately from the in-container port so a proxy can own the
+      # public one; set BC_WEBCLIENT_HOST_PORT=8081 when Traefik is in front.
+      - "${BC_WEBCLIENT_HOST_PORT:-8080}:8080"
     environment:
       BC_VERSION: ${BC_VERSION:-28.4}
       BC_COUNTRY: ${BC_COUNTRY:-w1}
@@ -173,6 +175,15 @@ services:
       # Microsoft account has a UPN like user@tenant.onmicrosoft.com in Graph but
       # presents user@gmail.com in the token; BC matches on the latter.
       BC_AAD_USER_UPN: ${BC_AAD_USER_UPN:-}
+      # Serve the web client over TLS so a proxy can re-terminate rather than
+      # forward cleartext. With this set the forwarded-header fallback below is
+      # unnecessary and stays off.
+      BC_WEBCLIENT_HTTPS_PFX: ${BC_WEBCLIENT_HTTPS_PFX:-}
+      BC_WEBCLIENT_HTTPS_PFX_PASSWORD: ${BC_WEBCLIENT_HTTPS_PFX_PASSWORD:-}
+      # Fallback for a proxy that forwards plain HTTP: reconstruct scheme and host
+      # from X-Forwarded-*. Only needed when TLS is NOT re-terminated at the
+      # container. See docs/WEBCLIENT-POC.md.
+      BC_WEBCLIENT_FORWARDED_HEADERS: ${BC_WEBCLIENT_FORWARDED_HEADERS:-0}
       SQL_SERVER: sql
       # .NET runtime tuning. Defaults are inherited from the entrypoint
       # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
@@ -198,6 +209,9 @@ services:
     volumes:
       - ${BC_ARTIFACTS_DIR:-bc-artifacts}:/bc/artifacts
       - bc-service:/bc/service
+      # Certificate the web client serves TLS with, when BC_WEBCLIENT_HTTPS_PFX
+      # names one. Read-only; the container never writes here.
+      - ${BC_CERT_DIR:-../certs}:/certs:ro
       # Compiled-assembly (R2R) cache. 1.2 GB on BC 28.1 and rebuilt from
       # scratch every boot when it lives in the container filesystem. The
       # entrypoint symlinks BC's per-instance apps/assembly dirs in here and
