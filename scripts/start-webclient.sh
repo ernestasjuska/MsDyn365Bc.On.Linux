@@ -81,13 +81,16 @@ done)
 # UI (action bar, chevrons, system tray) is missing.
 [ -e "$WEBCLIENT_DIR/wwwroot/Resources/Fonts" ] || ln -s fonts "$WEBCLIENT_DIR/wwwroot/Resources/Fonts"
 
-# Point the web client at the local NST (NavUserPassword over ws://localhost:7085)
-python3 - "$WEBCLIENT_DIR" "$PORT" "$PATHBASE" "$REQUIRE_SSL" <<'PYEOF'
+# Point the web client at the local NST (over ws://localhost:7085)
+python3 - "$WEBCLIENT_DIR" "$PORT" "$PATHBASE" "$REQUIRE_SSL" \
+    "${BC_AAD_APP_ID:-}" "${BC_AAD_TENANT_ID:-}" <<'PYEOF'
 import json, sys
 base = sys.argv[1]
 port = sys.argv[2]
 pathbase = sys.argv[3]
 require_ssl = sys.argv[4]
+aad_app_id = sys.argv[5]
+aad_tenant_id = sys.argv[6]
 
 # hosting.json wins over ASPNETCORE_URLS (the app calls UseUrls with it).
 # The path component (if any) is stripped back off by HttpSysStub's
@@ -100,7 +103,21 @@ n = d["NAVWebSettings"]
 n["Server"] = "localhost"
 n["ServerInstance"] = "BC"
 n["ClientServicesPort"] = "7085"
-n["ClientServicesCredentialType"] = "NavUserPassword"
+if aad_app_id:
+    # AadApplicationId and AadAuthorityUri are only read when the credential type
+    # is AccessControlService (see the comments in the shipped navsettings.json).
+    # The authority is tenant-specific rather than /common because the app
+    # registration is single-tenant.
+    n["ClientServicesCredentialType"] = "AccessControlService"
+    n["AadApplicationId"] = aad_app_id
+    n["AadAuthorityUri"] = f"https://login.microsoftonline.com/{aad_tenant_id}"
+    # BC 25+ asks Entra for a token with this audience and hands it to the NST,
+    # which must list the same value in ValidAudiences. BcContainerHelper sets
+    # the pair together (New-NavContainer.ps1:1422); without it the tier falls
+    # back to validating the connection as a username/password.
+    n["AadValidAudience"] = "https://api.businesscentral.dynamics.com"
+else:
+    n["ClientServicesCredentialType"] = "NavUserPassword"
 n["RequireSsl"] = require_ssl
 n["ServerHttps"] = False
 n["AuthenticateServer"] = "false"
@@ -127,5 +144,6 @@ exec env \
     DOTNET_TieredCompilation=0 \
     DOTNET_SYSTEM_GLOBALIZATION_USENLS=0 \
     HTTPSYS_STUB_INJECT_IDENTITY=0 \
+    HTTPSYS_STUB_FORWARDED_HEADERS=1 \
     ASPNETCORE_URLS="http://0.0.0.0:$PORT" \
     dotnet Prod.Client.WebCoreApp.dll
