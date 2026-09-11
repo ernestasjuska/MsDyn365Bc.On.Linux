@@ -168,6 +168,10 @@ services:
       # matches the token's object id against.
       BC_AAD_APP_ID: ${BC_AAD_APP_ID:-}
       BC_AAD_TENANT_ID: ${BC_AAD_TENANT_ID:-}
+      # Must be the address Entra puts in the token's email / unique_name claim,
+      # which is NOT always the directory UPN. An account federated to a personal
+      # Microsoft account has a UPN like user@tenant.onmicrosoft.com in Graph but
+      # presents user@gmail.com in the token; BC matches on the latter.
       BC_AAD_USER_UPN: ${BC_AAD_USER_UPN:-}
       SQL_SERVER: sql
       # .NET runtime tuning. Defaults are inherited from the entrypoint
