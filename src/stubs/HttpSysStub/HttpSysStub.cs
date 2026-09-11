@@ -82,7 +82,11 @@ namespace Microsoft.AspNetCore.Hosting
                 if (!string.IsNullOrEmpty(pfx) && System.IO.File.Exists(pfx))
                 {
                     var pwd = Environment.GetEnvironmentVariable("HTTPSYS_STUB_HTTPS_PFX_PASSWORD") ?? string.Empty;
+#if NET9_0_OR_GREATER
                     var cert = X509CertificateLoader.LoadPkcs12FromFile(pfx, pwd);
+#else
+                    var cert = new X509Certificate2(pfx, pwd);
+#endif
                     k.ConfigureHttpsDefaults(h => h.ServerCertificate = cert);
                     Console.WriteLine($"[HttpSysStub] HTTPS certificate loaded from {pfx} (subject {cert.Subject})");
                 }
