@@ -266,6 +266,9 @@ services:
       - bc
     ports:
       - "${BC_TRAEFIK_PORT:-8080}:8080"
+      # Dashboard/API. Its entrypoint defaults to :8080 and would clash with the
+      # web entrypoint above, so it is moved rather than left on the default.
+      - "${BC_TRAEFIK_API_PORT:-8090}:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik:/etc/traefik:ro
@@ -275,6 +278,7 @@ services:
       - --providers.docker.exposedbydefault=false
       - --providers.file.filename=/etc/traefik/dynamic.yml
       - --entrypoints.web.address=:8080
+      - --entrypoints.traefik.address=:8090
       - --api.insecure=true
       - --api.dashboard=true
       - --log.level=INFO
