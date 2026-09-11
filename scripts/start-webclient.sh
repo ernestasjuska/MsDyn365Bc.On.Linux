@@ -81,13 +81,16 @@ done)
 # UI (action bar, chevrons, system tray) is missing.
 [ -e "$WEBCLIENT_DIR/wwwroot/Resources/Fonts" ] || ln -s fonts "$WEBCLIENT_DIR/wwwroot/Resources/Fonts"
 
-# Point the web client at the local NST (NavUserPassword over ws://localhost:7085)
-python3 - "$WEBCLIENT_DIR" "$PORT" "$PATHBASE" "$REQUIRE_SSL" <<'PYEOF'
+# Point the web client at the local NST (over ws://localhost:7085)
+python3 - "$WEBCLIENT_DIR" "$PORT" "$PATHBASE" "$REQUIRE_SSL" \
+    "${BC_AAD_APP_ID:-}" "${BC_AAD_TENANT_ID:-}" <<'PYEOF'
 import json, sys
 base = sys.argv[1]
 port = sys.argv[2]
 pathbase = sys.argv[3]
 require_ssl = sys.argv[4]
+aad_app_id = sys.argv[5]
+aad_tenant_id = sys.argv[6]
 
 # hosting.json wins over ASPNETCORE_URLS (the app calls UseUrls with it).
 # The path component (if any) is stripped back off by HttpSysStub's
@@ -100,7 +103,16 @@ n = d["NAVWebSettings"]
 n["Server"] = "localhost"
 n["ServerInstance"] = "BC"
 n["ClientServicesPort"] = "7085"
-n["ClientServicesCredentialType"] = "NavUserPassword"
+if aad_app_id:
+    # AadApplicationId and AadAuthorityUri are only read when the credential type
+    # is AccessControlService (see the comments in the shipped navsettings.json).
+    # The authority is tenant-specific rather than /common because the app
+    # registration is single-tenant.
+    n["ClientServicesCredentialType"] = "AccessControlService"
+    n["AadApplicationId"] = aad_app_id
+    n["AadAuthorityUri"] = f"https://login.microsoftonline.com/{aad_tenant_id}"
+else:
+    n["ClientServicesCredentialType"] = "NavUserPassword"
 n["RequireSsl"] = require_ssl
 n["ServerHttps"] = False
 n["AuthenticateServer"] = "false"

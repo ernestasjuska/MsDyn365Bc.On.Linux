@@ -207,7 +207,7 @@ STEP2_START=$(date +%s)
 # in this volume already holds the password, but a stamp file is no place to
 # copy it to. Everything else Step 2 writes is a constant.
 SERVICE_STAMP_FILE="$SERVICE_DIR/.bc-service-stamp"
-SERVICE_CONFIG_FP=$(printf '%s|%s|%s' "$SQL_SERVER" "$BC_DB_USER" "$BC_DB_PASSWORD" | md5sum | cut -c1-12)
+SERVICE_CONFIG_FP=$(printf '%s|%s|%s|%s' "$SQL_SERVER" "$BC_DB_USER" "$BC_DB_PASSWORD" "$BC_AAD_APP_ID" | md5sum | cut -c1-12)
 SERVICE_STAMP="v1|platform=$PLATFORM_VERSION|image=$(stat -c '%s-%Y' /bc/hook/StartupHook.dll 2>/dev/null || echo unknown)|config=$SERVICE_CONFIG_FP"
 if [ -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ] && \
    [ "$(cat "$SERVICE_STAMP_FILE" 2>/dev/null || true)" != "$SERVICE_STAMP" ]; then
@@ -276,6 +276,22 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
         -e "s|ServerInstance\" value=\"[^\"]*\"|ServerInstance\" value=\"BC\"|" \
         -e "s|ExtensionAllowedTargetLevel\" value=\"[^\"]*\"|ExtensionAllowedTargetLevel\" value=\"OnPrem\"|" \
         "$CONFIG"
+
+    # Entra ID token validation, additive to NavUserPassword above. The NST keeps
+    # basic auth deliberately: ClientServicesCredentialType=AccessControlService
+    # turns it off tier-wide, and the dev endpoint, the test toolkit publish and
+    # the compose healthcheck all authenticate that way, so the container never
+    # reaches healthy. ValidAudiences carries both forms of the audience claim the
+    # web client may present: the bare app id and the api:// identifier uri.
+    if [ -n "$BC_AAD_APP_ID" ]; then
+        sed -i \
+            -e "s|AppIdUri\" value=\"[^\"]*\"|AppIdUri\" value=\"api://$BC_AAD_APP_ID\"|" \
+            -e "s|ValidAudiences\" value=\"[^\"]*\"|ValidAudiences\" value=\"$BC_AAD_APP_ID;api://$BC_AAD_APP_ID\"|" \
+            -e "s|ExtendedSecurityTokenLifetime\" value=\"[^\"]*\"|ExtendedSecurityTokenLifetime\" value=\"24\"|" \
+            -e "s|DisableTokenSigningCertificateValidation\" value=\"[^\"]*\"|DisableTokenSigningCertificateValidation\" value=\"true\"|" \
+            "$CONFIG"
+        log_step "Auth: Entra ID token validation enabled (app $BC_AAD_APP_ID)"
+    fi
 
     # Ensure TenantEnvironmentType=Sandbox (required for test automation at platform level)
     if grep -q "TenantEnvironmentType" "$CONFIG"; then
@@ -1018,6 +1034,23 @@ BEGIN
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
 END
 "
+
+# Entra identity for the same user row. The NST matches the token's object id
+# against [User Property].[Authentication Object ID]; the UPN goes on the [User]
+# row so the user is recognisable in the UI. Reusing the existing row keeps the
+# SUPER permission set above.
+if [ -n "$BC_AAD_USER_OBJECT_ID" ]; then
+    $SQLCMD_DB -b -Q "
+UPDATE [User]
+SET [Authentication Email] = N'$BC_AAD_USER_UPN', [\$systemModifiedAt] = GETUTCDATE()
+WHERE [User Security ID] = '$USER_GUID';
+
+UPDATE [User Property]
+SET [Authentication Object ID] = N'$BC_AAD_USER_OBJECT_ID', [\$systemModifiedAt] = GETUTCDATE()
+WHERE [User Security ID] = '$USER_GUID';
+"
+    log_step "Mapped $BC_SERVER_USERNAME to Entra object $BC_AAD_USER_OBJECT_ID ($BC_AAD_USER_UPN)"
+fi
 
 # Background SUPER user — safety net so tests can freely disable/delete users
 # without violating the "at least one enabled SUPER user" platform constraint.

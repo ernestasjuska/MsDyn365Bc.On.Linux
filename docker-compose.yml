@@ -160,6 +160,15 @@ services:
       # this (defaulting to http://localhost:<port>/), so it has to be forwarded
       # here or an external hostname can never be set. See docs/WEBCLIENT-POC.md.
       BC_WEBCLIENT_PUBLIC_URL: ${BC_WEBCLIENT_PUBLIC_URL:-}
+      # Entra ID sign-in for the web client. Setting an app id switches the web
+      # client to token auth and teaches the NST to accept those tokens; the tier
+      # keeps NavUserPassword so the dev endpoint and healthcheck still work. The
+      # user object id maps a tenant identity onto the BC user row, which is what
+      # the token is matched against.
+      BC_AAD_APP_ID: ${BC_AAD_APP_ID:-}
+      BC_AAD_TENANT_ID: ${BC_AAD_TENANT_ID:-}
+      BC_AAD_USER_UPN: ${BC_AAD_USER_UPN:-}
+      BC_AAD_USER_OBJECT_ID: ${BC_AAD_USER_OBJECT_ID:-}
       SQL_SERVER: sql
       # .NET runtime tuning. Defaults are inherited from the entrypoint
       # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
