@@ -226,6 +226,23 @@ services:
       # a character device — the entrypoint's `[ -f ]` check fails and the default
       # Cronus license is used. No effect when unset.
       - ${BC_LICENSE_HOST_PATH:-/dev/null}:/bc/custom-license.bclicense:ro
+    labels:
+      # Routing for the optional traefik service below. Inert unless it runs.
+      # The public host is set rather than preserved: a devtunnel relay rewrites
+      # Host to "localhost:<port>" whatever its --host-header says, so the only
+      # way the web client learns its public name is to be told. Behind a proxy
+      # on a real DNS name, drop the publichost middleware and let
+      # passHostHeader do its job.
+      traefik.enable: "true"
+      traefik.http.routers.bcweb.rule: "PathPrefix(`/`)"
+      traefik.http.routers.bcweb.entrypoints: "web"
+      traefik.http.routers.bcweb.service: "bcweb"
+      traefik.http.routers.bcweb.middlewares: "publichost"
+      traefik.http.middlewares.publichost.headers.customrequestheaders.Host: "${BC_WEBCLIENT_PUBLIC_HOST:-}"
+      traefik.http.services.bcweb.loadbalancer.server.port: "8080"
+      traefik.http.services.bcweb.loadbalancer.server.scheme: "https"
+      traefik.http.services.bcweb.loadbalancer.serverstransport: "bc-transport@file"
+      traefik.http.services.bcweb.loadbalancer.passhostheader: "true"
     healthcheck:
       test: test -f /tmp/bc-ready && curl -sf -o /dev/null -u '${BC_SERVER_USERNAME:-BCRUNNER}:${BC_SERVER_PASSWORD:-Admin123!}' http://localhost:7048/BC/ODataV4/Company || exit 1
       # 2s interval (was 15s, then 5s) so the healthy transition is seen within
@@ -236,6 +253,32 @@ services:
       retries: 900            # 2s × 900 = 30 min after start_period
       start_period: 60s
       timeout: 5s             # was 10s; the probe is cheap, fail fast
+
+  # Reverse proxy for the web client. Opt-in:
+  #   docker compose --profile traefik up -d
+  # It terminates the inbound connection and opens a second TLS connection to the
+  # bc container, so the web client sees https natively instead of inferring the
+  # scheme from X-Forwarded-Proto.
+  traefik:
+    profiles: ["traefik"]
+    image: ${BC_TRAEFIK_IMAGE:-traefik:v3.6}
+    depends_on:
+      - bc
+    ports:
+      - "${BC_TRAEFIK_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik:/etc/traefik:ro
+      - ${BC_CERT_DIR:-../certs}:/certs:ro
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --entrypoints.web.address=:8080
+      - --api.insecure=true
+      - --api.dashboard=true
+      - --log.level=INFO
+      - --accesslog
 
 volumes:
   bc-artifacts:
