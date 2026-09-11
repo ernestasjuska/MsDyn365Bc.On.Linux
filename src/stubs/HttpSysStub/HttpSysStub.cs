@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Microsoft.AspNetCore.Server.HttpSys
@@ -67,6 +68,24 @@ namespace Microsoft.AspNetCore.Hosting
                 k.AllowSynchronousIO = opts.AllowSynchronousIO;
                 if (opts.MaxRequestBodySize.HasValue)
                     k.Limits.MaxRequestBodySize = opts.MaxRequestBodySize;
+
+                // Serve TLS directly when a certificate is supplied, so an https://
+                // binding in hosting.json works. Kestrel would otherwise reach for the
+                // dotnet developer certificate and abort with "Unable to configure HTTPS
+                // endpoint". The ASPNETCORE_Kestrel__Certificates__* configuration path
+                // is not an option here: BC builds its host without binding that section.
+                //
+                // This is what lets a proxy re-terminate TLS at the container instead of
+                // forwarding plain HTTP, which in turn means the app sees the real scheme
+                // natively rather than inferring it from X-Forwarded-Proto.
+                var pfx = Environment.GetEnvironmentVariable("HTTPSYS_STUB_HTTPS_PFX");
+                if (!string.IsNullOrEmpty(pfx) && System.IO.File.Exists(pfx))
+                {
+                    var pwd = Environment.GetEnvironmentVariable("HTTPSYS_STUB_HTTPS_PFX_PASSWORD") ?? string.Empty;
+                    var cert = X509CertificateLoader.LoadPkcs12FromFile(pfx, pwd);
+                    k.ConfigureHttpsDefaults(h => h.ServerCertificate = cert);
+                    Console.WriteLine($"[HttpSysStub] HTTPS certificate loaded from {pfx} (subject {cert.Subject})");
+                }
             });
 
             builder.ConfigureServices(services =>
