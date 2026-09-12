@@ -37,6 +37,10 @@ docker compose exec bc tail -f /tmp/webclient.log
 The host port is `${BC_WEBCLIENT_PORT:-8080}`. Everything is additive and
 opt-in: with `BC_WEBCLIENT` unset, nothing about the NST boot path changes.
 
+Settings can go in `.env` instead of the command line — for the Entra and
+Traefik setup below they have to, since a bare `docker compose up -d` that
+omits them recreates bc without them.
+
 When `BC_WEBCLIENT=1`, the entrypoint also sets the NST's `PublicWebBaseUrl`
 to `http://localhost:${BC_WEBCLIENT_PORT:-8080}/` (override with
 `BC_WEBCLIENT_PUBLIC_URL` when the host-published port differs, e.g. parallel
@@ -86,6 +90,139 @@ access.
 BC_WEBCLIENT=1 BC_WEBCLIENT_PATHBASE=/my-tier BC_WEBCLIENT_REQUIRE_SSL=1 \
   docker compose up -d --wait
 ```
+
+## Entra ID sign-in
+
+Working, and the split is the whole trick: **the NST stays on
+`NavUserPassword`; only the web client is `AccessControlService`.** Moving the
+tier to `AccessControlService` breaks the container healthcheck (it does basic
+auth against OData) and the AL toolkit publish (HTTP 401). The web client
+validates the Entra token itself, then opens its client-services session over
+7085 exactly as before — `ClientServicesUserNamePasswordValidator` on the tier
+delegates to `WSFederationValidator`, so NavUserPassword and Entra are not the
+alternatives they look like.
+
+Everything lives in `.env`; `docker compose --profile traefik up -d` needs no
+command-line variables:
+
+```bash
+BC_WEBCLIENT=1
+BC_AAD_APP_ID=<app id>
+BC_AAD_TENANT_ID=<tenant id>
+BC_AAD_USER_UPN=<the token's email claim>
+BC_WEBCLIENT_PUBLIC_URL=https://<host>:<port>/
+BC_WEBCLIENT_PUBLIC_HOST=<host>:<port>
+BC_WEBCLIENT_HOST_PORT=8081          # bc moves off 8080 so Traefik can take it
+BC_WEBCLIENT_HTTPS_PFX=/certs/bc.pfx
+BC_WEBCLIENT_HTTPS_PFX_PASSWORD=<pfx password>
+BC_WEBCLIENT_FORWARDED_HEADERS=0     # Traefik re-originates TLS instead
+```
+
+### Pitfalls, each of which cost a debugging cycle
+
+- **`BC_AAD_USER_UPN` is the token's `email` claim, not the directory UPN.**
+  A personal Microsoft account federated into the tenant signs in with
+  `idp: live.com`, and its token carries `email=user@gmail.com` while the
+  directory UPN is `user@tenant.onmicrosoft.com`. BC matches the token to a
+  row in `[User]` by `[Authentication Email]`, so the directory UPN silently
+  matches nothing. Symptom: sign-in completes at Microsoft and BC still
+  rejects you.
+- **Only one BC user may carry a given `[Authentication Email]`.** The
+  entrypoint derives the user name from the local part of
+  `BC_AAD_USER_UPN` (`user@gmail.com` → `USER`) and guards on
+  `IF NOT EXISTS ([User Name])`, not on the email — so a second hand-made row
+  with the same email collides. Leave `[Authentication Object ID]` empty; BC
+  writes it on first successful sign-in.
+- **`ADOpenIdMetadataLocation` must be set.** Empty produces the opaque
+  "You cannot sign in due to a technical issue" page after a successful
+  Microsoft round-trip.
+- **`PublicWebBaseUrl` must include the port.** BC derives both the OAuth
+  redirect URI and the WebSocket allowed-origin list from it. A port-less
+  value 403s every `/csh` upgrade.
+- **DataProtection keys are not persisted.** Any `bc` recreate invalidates
+  auth and antiforgery cookies — sign in again.
+
+### What devtunnel does to your headers
+
+The relay rewrites **both `Host` and `Origin`** to `localhost:<port>`,
+regardless of `--host-header unchanged` and `--origin-header unchanged`.
+Measured, sending `Origin: https://<host>:8080` through the tunnel and reading
+it off Traefik's access log:
+
+```
+direct to Traefik : "request_Origin":"https://<host>:8080"
+through the tunnel: "request_Origin":"http://localhost:8080"
+```
+
+`Host` breaks the OAuth redirect (you land on `localhost:8080`). `Origin`
+breaks the web client's session socket: BC's WebSocket middleware compares
+`Origin` against `PublicWebBaseUrl` and answers **403 with an empty body** on
+a mismatch, so `/csh` never upgrades and the client sits at "Getting ready…"
+forever. Against an authenticated session, every `Origin` value returns 403
+except the exact public one, which returns 101.
+
+The `publichost` middleware restores both. Behind a proxy on a real DNS name,
+drop it and let `passHostHeader` do its job.
+
+The tunnel also has to allow anonymous access: the relay answers an
+unauthenticated GET with a 302 but an unauthenticated POST with a 401, and
+Entra's `form_post` callback is a POST.
+
+```bash
+devtunnel create bc-web -d "BC Linux web client" -e 30d
+devtunnel port create bc-web -p 8080 --protocol http
+devtunnel access create bc-web -a
+devtunnel host bc-web
+```
+
+### Traefik
+
+Opt-in via `--profile traefik`. It terminates the browser connection and opens
+a **second TLS connection** to the bc container, so the web client sees `https`
+natively rather than inferring it from `X-Forwarded-Proto` — which is what
+OAuth redirect URIs and `Secure` cookies key off. That is why
+`BC_WEBCLIENT_FORWARDED_HEADERS=0`.
+
+The backend certificate is validated, not skipped: `traefik/dynamic.yml` pins
+`rootCAs: /certs/ca.crt` and `serverName: bc` (the compose service name, which
+keeps the file free of environment-specific values). Generate a CA and a leaf
+whose SAN covers the compose service name, localhost and the public hostname:
+
+```bash
+mkdir -p certs && cd certs
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 365 \
+  -subj "/CN=BC dev CA"
+printf 'subjectAltName=DNS:<public host>,DNS:bc,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > san.cnf
+openssl req -newkey rsa:2048 -nodes -keyout bc.key -out bc.csr -subj "/CN=<public host>"
+openssl x509 -req -in bc.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out bc.crt \
+  -days 365 -extfile san.cnf
+openssl pkcs12 -export -out bc.pfx -inkey bc.key -in bc.crt -passout pass:<pfx password>
+```
+
+`BC_CERT_DIR` (default `../certs`) mounts it into both containers at `/certs`.
+Keeping it outside the repo keeps the private keys out of git.
+
+### App registration
+
+Single-tenant, `requestedAccessTokenVersion: 2`, `isFallbackPublicClient: true`,
+both implicit-grant boxes on (BC uses `response_type=code id_token` with
+`response_mode=form_post`), `identifierUris: ["api://<app id>"]` — a bare
+`api://<app id>` with no trailing slash, or Entra rejects it with
+`IdentifierUrisEndsWithSlash`, and anything on an unverified domain fails with
+`HostNameNotOnVerifiedDomain`. Redirect URIs must list **both** `/SignIn` and
+`/OAuthLanding.htm` on the public host.
+
+Delegated permissions: `user_impersonation` and `Financials.ReadWrite.All` on
+the BC first-party app `996def3d-b36c-4153-8607-a6fd3c01b89f`, plus the Graph
+basics (`openid`, `profile`, `email`, `offline_access`, `User.Read`). If the BC
+service principal doesn't exist in the tenant yet, create it before granting
+consent. Don't add SharePoint or Power BI permissions unless those service
+principals exist in the tenant — admin consent fails for the whole app if any
+resource is missing.
+
+The BC API permissions matter only for calling the OData/API endpoints with a
+bearer token; **the web client works without them**, so a 401 from
+`/api/v2.0/companies` proves nothing about web-client sign-in.
 
 ## Architecture
 
@@ -273,10 +410,7 @@ connections right after `--wait` returns, give it a moment.
   would be the first place to look (likely needs a W2-style hook on its
   persistence path).
 - Untested surface: reports/printing, file upload/download, designer,
-  multi-user/multi-session behavior, OAuth/AAD auth modes, Teams/Office
-  add-in hosts, DataProtection key persistence across restarts (sessions die
-  on container restart; antiforgery/auth cookies reset — devs just sign in
-  again).
+  multi-user/multi-session behavior, Teams/Office add-in hosts.
 - `Resources\ExtractedResources` extraction (tenant media etc.) works via
   the W2 hook but has only been exercised lightly.
 
