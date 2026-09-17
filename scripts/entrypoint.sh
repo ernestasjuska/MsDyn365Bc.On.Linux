@@ -1830,6 +1830,31 @@ PYEOF
             done
         ) &
     fi
+
+    # A second web client for automated agents. The instance above keeps
+    # whatever sign-in the people use, normally Entra; this one is always
+    # NavUserPassword, because an agent has no Entra account and flipping the
+    # shared instance would take that sign-in away from everybody else. Both
+    # front ends drive the same NST, so they show the same data.
+    if [ "${BC_WEBCLIENT_AGENT:-0}" = "1" ]; then
+        AGENT_PORT="${BC_WEBCLIENT_AGENT_PORT:-8081}"
+        AGENT_PATHBASE="${BC_WEBCLIENT_AGENT_PATHBASE:-${BC_WEBCLIENT_PATHBASE:-}dev}"
+        echo "[entrypoint] BC_WEBCLIENT_AGENT=1: starting NavUserPassword web client on port $AGENT_PORT at $AGENT_PATHBASE (log: /tmp/webclient-agent.log)"
+        (
+            while true; do
+                # Empty BC_AAD_APP_ID is what makes start-webclient.sh write
+                # ClientServicesCredentialType=NavUserPassword.
+                WEBCLIENT_DIR=/bc/webclient-agent \
+                BC_WEBCLIENT_PORT="$AGENT_PORT" \
+                BC_WEBCLIENT_PATHBASE="$AGENT_PATHBASE" \
+                BC_AAD_APP_ID= \
+                BC_AAD_TENANT_ID= \
+                    /bc/scripts/start-webclient.sh >> /tmp/webclient-agent.log 2>&1
+                echo "[entrypoint] agent web client exited (rc=$?) — restarting in 3s"
+                sleep 3
+            done
+        ) &
+    fi
 ) &
 
 wait $BC_PID
