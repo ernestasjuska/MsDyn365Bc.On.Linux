@@ -111,6 +111,7 @@ def read_app_info(app_path: str) -> dict | None:
                         ],
                     }
                 inner["path"] = app_path
+                inner["r2r"] = True
                 return inner
 
             # Regular AL package
@@ -118,6 +119,7 @@ def read_app_info(app_path: str) -> dict | None:
                 xml = z.read("NavxManifest.xml").decode("utf-8", errors="replace")
                 info = _parse_navx_manifest(xml)
                 info["path"] = app_path
+                info["r2r"] = False
                 return info
 
             # Rare fallback: source .app with app.json instead of NavxManifest
@@ -139,6 +141,7 @@ def read_app_info(app_path: str) -> dict | None:
                         if (d.get("id") or d.get("appId"))
                     ],
                     "path": app_path,
+                    "r2r": False,
                 }
     except Exception as e:
         print(f"WARN: cannot read {app_path}: {e}", file=sys.stderr)
@@ -158,6 +161,22 @@ def version_tuple(v: str) -> tuple:
     return tuple(parts[:4])
 
 
+def _preferred(candidate: dict, existing: dict) -> bool:
+    """Should `candidate` replace `existing` in the index?
+
+    Higher version wins. On equal versions prefer the plain copy over the
+    Ready2Run wrapper: the dev endpoint refuses an R2R package outright
+    (HTTP 422, "Error code: 85132273"), and the platform artifact ships a
+    plain copy of the same version next to it. Library Assert is the one
+    that bites, because every boot republishes the test framework.
+    """
+    candidate_version = version_tuple(candidate["version"])
+    existing_version = version_tuple(existing["version"])
+    if candidate_version != existing_version:
+        return candidate_version > existing_version
+    return existing.get("r2r", False) and not candidate.get("r2r", False)
+
+
 def load_artifact_apps(artifact_dir: str) -> dict:
     """Walk an artifact tree and index every .app by its app id.
 
@@ -173,6 +192,6 @@ def load_artifact_apps(artifact_dir: str) -> dict:
             if not info or not info.get("id"):
                 continue
             existing = apps.get(info["id"])
-            if existing is None or version_tuple(info["version"]) > version_tuple(existing["version"]):
+            if existing is None or _preferred(info, existing):
                 apps[info["id"]] = info
     return apps
