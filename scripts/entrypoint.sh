@@ -954,12 +954,28 @@ elif [ "${BC_CLEAR_ALL_APPS:-false}" = "true" ] || [ "${BC_CLEAR_ALL_APPS:-false
     " 2>/dev/null
     log_step "Cleared ALL pre-installed apps (BC_CLEAR_ALL_APPS=true)"
 else
+    # Only the ones that are stuck, meaning published as Global but never
+    # installed for a tenant. That is the state the sandbox image ships them
+    # in, and the whole reason for the wipe-and-re-POST.
+    #
+    # Wiping one that IS tenant-installed corrupts the database rather than
+    # refreshing it: its dependents stay installed pointing at a package that
+    # no longer exists, and the re-POST then fails with "Error code: 85132273"
+    # because a dev-scope publish may not replace an AppSource app that
+    # installed apps depend on. The rollback fails too, so the instance is
+    # left with no test framework at all and every later boot repeats it.
     $SQLCMD_DB -Q "
-    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any'));
-    DELETE FROM [NAV App Installed App] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any');
-    DELETE FROM [Published Application] WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any');
+    SET NOCOUNT ON;
+    SELECT [Package ID] INTO #stuck_tf
+    FROM [Published Application]
+    WHERE [Name] IN (N'Test Runner',N'Library Assert',N'Library Variable Storage',N'Permissions Mock',N'Any')
+      AND [Package ID] NOT IN (SELECT [Package ID] FROM [NAV App Installed App]);
+
+    DELETE FROM [Installed Application] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck_tf);
+    DELETE FROM [NAV App Installed App] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck_tf);
+    DELETE FROM [Published Application] WHERE [Package ID] IN (SELECT [Package ID] FROM #stuck_tf);
     " 2>/dev/null
-    log_step "Cleared test framework global entries (will re-publish via dev endpoint)"
+    log_step "Cleared stuck test framework entries (will re-publish via dev endpoint)"
 fi
 
 # Service user for scripting/OData/dev endpoint/web client sign-in (SUPER access).
@@ -1754,9 +1770,20 @@ for path in ordered:
     print(path)
 PYEOF
             )
+            # Re-POSTing an app that is already tenant-installed is not a
+            # no-op: it takes the same failing path as the wipe above and can
+            # roll the database into a worse state, so skip those outright.
+            INSTALLED_APPS=$($SQLCMD_DB -h -1 -W -Q \
+                "SET NOCOUNT ON; SELECT [Name] FROM [NAV App Installed App];" 2>/dev/null | tr -d '\r')
             while IFS= read -r APP_PATH; do
                 [ -z "$APP_PATH" ] && continue
                 NAME=$(basename "$APP_PATH")
+                APP_NAME=${NAME#Microsoft_}
+                APP_NAME=${APP_NAME%.app}
+                if printf '%s\n' "$INSTALLED_APPS" | grep -qxF "$APP_NAME"; then
+                    echo "[entrypoint]   $NAME: already installed, skipped"
+                    continue
+                fi
                 HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
                     -u "$BC_SERVER_USERNAME:$BC_SERVER_PASSWORD" -X POST \
                     -F "file=@$APP_PATH;type=application/octet-stream" \
