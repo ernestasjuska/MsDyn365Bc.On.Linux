@@ -154,6 +154,11 @@ services:
       # Reused for both Kestrel's bound URL and PublicWebBaseUrl. See
       # docs/WEBCLIENT-POC.md.
       BC_WEBCLIENT_PATHBASE: ${BC_WEBCLIENT_PATHBASE:-}
+      # A second web client on NavUserPassword, for automated agents that have
+      # no Entra account. Serves at BC_WEBCLIENT_PATHBASE + "dev" by default.
+      BC_WEBCLIENT_AGENT: ${BC_WEBCLIENT_AGENT:-0}
+      BC_WEBCLIENT_AGENT_PORT: ${BC_WEBCLIENT_AGENT_PORT:-8081}
+      BC_WEBCLIENT_AGENT_PATHBASE: ${BC_WEBCLIENT_AGENT_PATHBASE:-}
       # Set to 1 when a reverse proxy in front of the container terminates TLS,
       # so the web client emits https:// in its redirects instead of http://.
       # See docs/WEBCLIENT-POC.md.
