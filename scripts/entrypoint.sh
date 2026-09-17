@@ -1806,11 +1806,22 @@ PYEOF
                     continue
                 fi
                 NAME=$(basename "$app")
-                HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 600 \
+                BODY_FILE=$(mktemp)
+                HTTP=$(curl -s -o "$BODY_FILE" -w "%{http_code}" --max-time 600 \
                     -u "$BC_SERVER_USERNAME:$BC_SERVER_PASSWORD" -X POST \
                     -F "file=@$app;type=application/octet-stream" \
                     "$DEV_URL/apps?SchemaUpdateMode=forcesync" 2>/dev/null)
-                echo "[entrypoint]   $NAME: HTTP $HTTP"
+                # Re-publishing a version that is already there answers 422 with
+                # "A duplicate package ID is detected". That is the steady state
+                # on every boot after the first, not a failure, and printing it
+                # as one sends the next reader hunting a bug that is not there.
+                if [ "$HTTP" = "422" ] && grep -qi "duplicate package ID" "$BODY_FILE"; then
+                    echo "[entrypoint]   $NAME: already published at this version"
+                else
+                    echo "[entrypoint]   $NAME: HTTP $HTTP"
+                    [ "$HTTP" = "200" ] || head -c 400 "$BODY_FILE"
+                fi
+                rm -f "$BODY_FILE"
             done
         fi
 
