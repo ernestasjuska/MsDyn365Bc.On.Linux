@@ -210,7 +210,7 @@ STEP2_START=$(date +%s)
 # in this volume already holds the password, but a stamp file is no place to
 # copy it to. Everything else Step 2 writes is a constant.
 SERVICE_STAMP_FILE="$SERVICE_DIR/.bc-service-stamp"
-SERVICE_CONFIG_FP=$(printf '%s|%s|%s|%s' "$SQL_SERVER" "$BC_DB_USER" "$BC_DB_PASSWORD" "$BC_AAD_APP_ID" | md5sum | cut -c1-12)
+SERVICE_CONFIG_FP=$(printf '%s|%s|%s|%s|%s' "$SQL_SERVER" "$BC_DATABASE" "$BC_DB_USER" "$BC_DB_PASSWORD" "$BC_AAD_APP_ID" | md5sum | cut -c1-12)
 SERVICE_STAMP="v1|platform=$PLATFORM_VERSION|image=$(stat -c '%s-%Y' /bc/hook/StartupHook.dll 2>/dev/null || echo unknown)|config=$SERVICE_CONFIG_FP"
 if [ -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ] && \
    [ "$(cat "$SERVICE_STAMP_FILE" 2>/dev/null || true)" != "$SERVICE_STAMP" ]; then
