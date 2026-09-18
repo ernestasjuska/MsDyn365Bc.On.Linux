@@ -148,6 +148,9 @@ services:
       BC_TEST_APPS: ${BC_TEST_APPS:-}
       # Opt-in: self-host Microsoft's real BC web client on Kestrel (port 8080).
       # EXPERIMENTAL PoC — see docs/WEBCLIENT-POC.md.
+      # The database this instance owns. Two instances on one SQL Server each need
+      # their own: the entrypoint restores its artifact's backup into it.
+      BC_DATABASE: ${BC_DATABASE:-CRONUS}
       BC_WEBCLIENT: ${BC_WEBCLIENT:-0}
       # Optional path prefix for a reverse proxy that routes by path on a single
       # shared hostname/port (e.g. "/my-tier"), instead of by hostname or port.
