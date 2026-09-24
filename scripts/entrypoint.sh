@@ -41,6 +41,10 @@ SQL_SERVER="${SQL_SERVER:-sql}"
 # The database this instance owns. Two instances sharing one SQL Server cannot
 # share one database: each restores its own artifact's backup over the other.
 BC_DATABASE="${BC_DATABASE:-CRONUS}"
+# Where this container can write into the volume SQL Server reads, and where SQL
+# sees that same volume. Empty when the instance shares SQL's artifact volume.
+SHARED_ARTIFACTS="${SHARED_ARTIFACTS:-/bc/shared-artifacts}"
+SHARED_ARTIFACTS_SQL_PATH="${SHARED_ARTIFACTS_SQL_PATH:-/bc/artifacts}"
 ARTIFACTS="/bc/artifacts"
 SERVICE_DIR="/bc/service"
 
@@ -672,14 +676,29 @@ if [ "$DB_EXISTS" != "1" ]; then
         exit 1
     fi
 
+    # RESTORE FROM DISK is a path on the SQL Server, not on this container. SQL
+    # mounts one shared artifact volume, so an instance with its own per-version
+    # volume must hand its backup over through the shared one or SQL restores
+    # whichever artifact happens to be there - silently, and from the wrong version.
+    SQL_BAK_PATH="$BAK_PATH"
+    if [ -d "$SHARED_ARTIFACTS" ]; then
+        mkdir -p "$SHARED_ARTIFACTS/restore"
+        STAGED_BAK="$SHARED_ARTIFACTS/restore/$BC_DATABASE.bak"
+        if [ "$(stat -c %s "$BAK_PATH" 2>/dev/null)" != "$(stat -c %s "$STAGED_BAK" 2>/dev/null)" ]; then
+            log_step "Staging $DB_FILE for SQL Server..."
+            cp "$BAK_PATH" "$STAGED_BAK"
+        fi
+        SQL_BAK_PATH="$SHARED_ARTIFACTS_SQL_PATH/restore/$BC_DATABASE.bak"
+    fi
+
     # Get logical file names (may contain spaces, e.g. "Demo Database BC (29-0)_Data")
     # Use tab-separated output to reliably parse
-    DATA_NAME=$($SQLCMD -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='$BAK_PATH'" 2>/dev/null | head -1 | cut -f1)
-    LOG_NAME=$($SQLCMD -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='$BAK_PATH'" 2>/dev/null | head -2 | tail -1 | cut -f1)
+    DATA_NAME=$($SQLCMD -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='$SQL_BAK_PATH'" 2>/dev/null | head -1 | cut -f1)
+    LOG_NAME=$($SQLCMD -h -1 -s $'\t' -W -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='$SQL_BAK_PATH'" 2>/dev/null | head -2 | tail -1 | cut -f1)
     log_step "DB logical names: data='$DATA_NAME' log='$LOG_NAME'"
 
     $SQLCMD -Q "
-        RESTORE DATABASE [$BC_DATABASE] FROM DISK='$BAK_PATH'
+        RESTORE DATABASE [$BC_DATABASE] FROM DISK='$SQL_BAK_PATH'
         WITH MOVE '$DATA_NAME' TO '/var/opt/mssql/data/$BC_DATABASE.mdf',
              MOVE '$LOG_NAME' TO '/var/opt/mssql/data/${BC_DATABASE}_log.ldf'
     "
@@ -730,10 +749,18 @@ if [ -z "$LICENSE_TO_IMPORT" ] && [ -n "$LICENSE_FILE" ] && [ -f "$ARTIFACTS/app
     LICENSE_TO_IMPORT="$ARTIFACTS/app/$LICENSE_FILE"
 fi
 if [ -n "$LICENSE_TO_IMPORT" ]; then
+    # OPENROWSET reads from the SQL Server's filesystem, the same trap as
+    # RESTORE FROM DISK: hand the file over through the volume SQL mounts.
+    SQL_LICENSE_PATH="$LICENSE_TO_IMPORT"
+    if [ -d "$SHARED_ARTIFACTS" ]; then
+        mkdir -p "$SHARED_ARTIFACTS/restore"
+        cp "$LICENSE_TO_IMPORT" "$SHARED_ARTIFACTS/restore/$BC_DATABASE.bclicense"
+        SQL_LICENSE_PATH="$SHARED_ARTIFACTS_SQL_PATH/restore/$BC_DATABASE.bclicense"
+    fi
     $SQLCMD_DB -Q "
     UPDATE [\$ndo\$dbproperty]
-    SET [license] = (SELECT BulkColumn FROM OPENROWSET(BULK '$LICENSE_TO_IMPORT', SINGLE_BLOB) AS f);
-    " 2>/dev/null
+    SET [license] = (SELECT BulkColumn FROM OPENROWSET(BULK '$SQL_LICENSE_PATH', SINGLE_BLOB) AS f);
+    "
     log_step "License imported: $(basename "$LICENSE_TO_IMPORT")"
 fi
 
