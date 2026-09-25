@@ -207,7 +207,7 @@ STEP2_START=$(date +%s)
 # in this volume already holds the password, but a stamp file is no place to
 # copy it to. Everything else Step 2 writes is a constant.
 SERVICE_STAMP_FILE="$SERVICE_DIR/.bc-service-stamp"
-SERVICE_CONFIG_FP=$(printf '%s|%s|%s' "$SQL_SERVER" "$BC_DB_USER" "$BC_DB_PASSWORD" | md5sum | cut -c1-12)
+SERVICE_CONFIG_FP=$(printf '%s|%s|%s|%s' "$SQL_SERVER" "$BC_DB_USER" "$BC_DB_PASSWORD" "$BC_AAD_APP_ID" | md5sum | cut -c1-12)
 SERVICE_STAMP="v1|platform=$PLATFORM_VERSION|image=$(stat -c '%s-%Y' /bc/hook/StartupHook.dll 2>/dev/null || echo unknown)|config=$SERVICE_CONFIG_FP"
 if [ -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ] && \
    [ "$(cat "$SERVICE_STAMP_FILE" 2>/dev/null || true)" != "$SERVICE_STAMP" ]; then
@@ -276,6 +276,41 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
         -e "s|ServerInstance\" value=\"[^\"]*\"|ServerInstance\" value=\"BC\"|" \
         -e "s|ExtensionAllowedTargetLevel\" value=\"[^\"]*\"|ExtensionAllowedTargetLevel\" value=\"OnPrem\"|" \
         "$CONFIG"
+
+    # Entra ID token validation, additive to NavUserPassword above. The NST keeps
+    # basic auth deliberately: ClientServicesCredentialType=AccessControlService
+    # turns it off tier-wide, and the dev endpoint, the test toolkit publish and
+    # the compose healthcheck all authenticate that way, so the container never
+    # reaches healthy.
+    #
+    # Three details are load-bearing, and all three come from a working Windows
+    # deployment rather than from guesswork:
+    #   - WSFederationLoginEndpoint must NOT be empty. An empty value is the
+    #     usual reason an Entra callback reaches BC and then fails. Its wtrealm
+    #     is the api:// identifier uri, with the "&" encoded as %26.
+    #   - ValidAudiences holds exactly two entries: the bare app id and the BC
+    #     api audience. It does NOT list api://<appid>, even though AppIdUri does.
+    #   - AppIdUri uses the api:// form, which is also all Entra will accept as an
+    #     identifier uri unless the domain is verified in the tenant.
+    if [ -n "$BC_AAD_APP_ID" ]; then
+        [ -z "$BC_AAD_TENANT_ID" ] && { log_step "ERROR: BC_AAD_APP_ID needs BC_AAD_TENANT_ID"; exit 1; }
+        WSFED="https://login.microsoftonline.com/$BC_AAD_TENANT_ID/wsfed?wa=wsignin1.0%26wtrealm=api://$BC_AAD_APP_ID"
+        # Where the tier fetches Entra's token-signing certificates. Empty is not a
+        # neutral default: the JWT handler then throws NavConfigurationException
+        # ("ADOpenIdMetadataLocation has a value that is not valid") while validating
+        # the signature, which surfaces to the browser as the generic "You cannot sign
+        # in due to a technical issue" and looks like a user-matching problem.
+        OIDMETA="https://login.microsoftonline.com/$BC_AAD_TENANT_ID/.well-known/openid-configuration"
+        sed -i \
+            -e "s|AppIdUri\" value=\"[^\"]*\"|AppIdUri\" value=\"api://$BC_AAD_APP_ID\"|" \
+            -e "s|ValidAudiences\" value=\"[^\"]*\"|ValidAudiences\" value=\"$BC_AAD_APP_ID;https://api.businesscentral.dynamics.com\"|" \
+            -e "s|WSFederationLoginEndpoint\" value=\"[^\"]*\"|WSFederationLoginEndpoint\" value=\"$WSFED\"|" \
+            -e "s|ADOpenIdMetadataLocation\" value=\"[^\"]*\"|ADOpenIdMetadataLocation\" value=\"$OIDMETA\"|" \
+            -e "s|ExtendedSecurityTokenLifetime\" value=\"[^\"]*\"|ExtendedSecurityTokenLifetime\" value=\"24\"|" \
+            -e "s|DisableTokenSigningCertificateValidation\" value=\"[^\"]*\"|DisableTokenSigningCertificateValidation\" value=\"true\"|" \
+            "$CONFIG"
+        log_step "Auth: Entra ID token validation enabled (app $BC_AAD_APP_ID)"
+    fi
 
     # Ensure TenantEnvironmentType=Sandbox (required for test automation at platform level)
     if grep -q "TenantEnvironmentType" "$CONFIG"; then
@@ -1018,6 +1053,52 @@ BEGIN
         NEWID(), GETUTCDATE(), '$USER_GUID', GETUTCDATE(), '$USER_GUID');
 END
 "
+
+# A separate BC user for the Entra identity, kept apart from the service account
+# above so the basic-auth path the healthcheck and the dev endpoint use is not
+# disturbed.
+#
+# [Authentication Object ID] is deliberately left EMPTY. BC matches an incoming
+# token to a user by [Authentication Email] and writes the object id itself on
+# the first successful sign-in. Writing it by hand is how this breaks: the format
+# is easy to get subtly wrong, and a wrong value fails authentication AFTER a
+# successful Entra round trip, which reads like a token problem rather than a
+# data problem. [Windows Security ID] and [Name Identifier] stay empty for the
+# same reason. A permission set is required: a user who authenticates but holds
+# none cannot get a usable session.
+if [ -n "$BC_AAD_USER_UPN" ]; then
+    AAD_USER_NAME="${BC_AAD_USER_NAME:-$(printf '%s' "${BC_AAD_USER_UPN%%@*}" | tr '[:lower:]' '[:upper:]')}"
+    AAD_USER_GUID=$(printf '%s' "$BC_AAD_USER_UPN" | md5sum | cut -c1-32 | \
+        sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/' | tr '[:lower:]' '[:upper:]')
+    AAD_PASSWORD_HASH=$(printf '%s' "$BC_SERVER_PASSWORD" | \
+        env DOTNET_STARTUP_HOOKS= /bc/tools/NavUserPasswordInspector/NavUserPasswordInspector generate \
+            --user-security-id "$AAD_USER_GUID")
+    $SQLCMD_DB -b -Q "
+IF NOT EXISTS (SELECT 1 FROM [User] WHERE [User Name] = N'$AAD_USER_NAME')
+BEGIN
+    INSERT INTO [User] ([User Security ID], [User Name], [Full Name], [State], [Expiry Date],
+        [Windows Security ID], [Change Password], [License Type], [Authentication Email],
+        [Contact Email], [Exchange Identifier], [Application ID],
+        [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
+    VALUES ('$AAD_USER_GUID', N'$AAD_USER_NAME', N'$AAD_USER_NAME', 0, '1753-01-01',
+        N'', 0, 0, N'$BC_AAD_USER_UPN', N'', N'', '00000000-0000-0000-0000-000000000000',
+        NEWID(), GETUTCDATE(), '$AAD_USER_GUID', GETUTCDATE(), '$AAD_USER_GUID');
+
+    INSERT INTO [User Property] ([User Security ID], [Password], [Name Identifier],
+        [Authentication Key], [WebServices Key], [WebServices Key Expiry Date],
+        [Authentication Object ID], [Directory Role ID], [Telemetry User ID],
+        [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
+    VALUES ('$AAD_USER_GUID', N'$AAD_PASSWORD_HASH', N'', N'', N'', '1753-01-01', N'', N'', '$AAD_USER_GUID',
+        NEWID(), GETUTCDATE(), '$AAD_USER_GUID', GETUTCDATE(), '$AAD_USER_GUID');
+
+    INSERT INTO [Access Control] ([User Security ID], [Role ID], [Company Name], [Scope], [App ID],
+        [\$systemId], [\$systemCreatedAt], [\$systemCreatedBy], [\$systemModifiedAt], [\$systemModifiedBy])
+    VALUES ('$AAD_USER_GUID', N'SUPER', N'', 0, '00000000-0000-0000-0000-000000000000',
+        NEWID(), GETUTCDATE(), '$AAD_USER_GUID', GETUTCDATE(), '$AAD_USER_GUID');
+END
+"
+    log_step "Entra user $AAD_USER_NAME ($BC_AAD_USER_UPN) ready; BC binds the object id on first sign-in"
+fi
 
 # Background SUPER user — safety net so tests can freely disable/delete users
 # without violating the "at least one enabled SUPER user" platform constraint.

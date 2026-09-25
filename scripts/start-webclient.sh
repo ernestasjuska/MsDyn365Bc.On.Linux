@@ -41,6 +41,13 @@ fi
 # scheme and emits "Location: http://<public-host>/SignIn", which the browser
 # then follows in cleartext against a TLS-only port. Also makes BC mark its
 # session cookies Secure. Off by default (direct http://localhost access).
+# Serve TLS from Kestrel instead of plain HTTP. Set this when a proxy in front of
+# the container re-terminates TLS rather than forwarding cleartext: the app then
+# sees the real scheme natively and needs no X-Forwarded-Proto interpretation,
+# which is what makes OAuth redirect URIs and Secure cookies come out right.
+HTTPS_PFX="${BC_WEBCLIENT_HTTPS_PFX:-}"
+HTTPS_PFX_PASSWORD="${BC_WEBCLIENT_HTTPS_PFX_PASSWORD:-}"
+
 REQUIRE_SSL="${BC_WEBCLIENT_REQUIRE_SSL:-false}"
 case "$REQUIRE_SSL" in
     1|true|True|TRUE|yes) REQUIRE_SSL="true" ;;
@@ -81,18 +88,23 @@ done)
 # UI (action bar, chevrons, system tray) is missing.
 [ -e "$WEBCLIENT_DIR/wwwroot/Resources/Fonts" ] || ln -s fonts "$WEBCLIENT_DIR/wwwroot/Resources/Fonts"
 
-# Point the web client at the local NST (NavUserPassword over ws://localhost:7085)
-python3 - "$WEBCLIENT_DIR" "$PORT" "$PATHBASE" "$REQUIRE_SSL" <<'PYEOF'
+# Point the web client at the local NST (over ws://localhost:7085)
+python3 - "$WEBCLIENT_DIR" "$PORT" "$PATHBASE" "$REQUIRE_SSL" \
+    "${BC_AAD_APP_ID:-}" "${BC_AAD_TENANT_ID:-}" \
+    "$([ -n "$HTTPS_PFX" ] && echo https || echo http)" <<'PYEOF'
 import json, sys
 base = sys.argv[1]
 port = sys.argv[2]
 pathbase = sys.argv[3]
 require_ssl = sys.argv[4]
+aad_app_id = sys.argv[5]
+aad_tenant_id = sys.argv[6]
+scheme = sys.argv[7]
 
 # hosting.json wins over ASPNETCORE_URLS (the app calls UseUrls with it).
 # The path component (if any) is stripped back off by HttpSysStub's
 # UrlStrippingStartupFilter, which calls UsePathBase() with it.
-json.dump({"urls": f"http://*:{port}{pathbase}"}, open(f"{base}/hosting.json", "w"), indent=2)
+json.dump({"urls": f"{scheme}://*:{port}{pathbase}"}, open(f"{base}/hosting.json", "w"), indent=2)
 
 p = f"{base}/navsettings.json"
 d = json.load(open(p, encoding="utf-8-sig"))
@@ -100,7 +112,21 @@ n = d["NAVWebSettings"]
 n["Server"] = "localhost"
 n["ServerInstance"] = "BC"
 n["ClientServicesPort"] = "7085"
-n["ClientServicesCredentialType"] = "NavUserPassword"
+if aad_app_id:
+    # AadApplicationId and AadAuthorityUri are only read when the credential type
+    # is AccessControlService (see the comments in the shipped navsettings.json).
+    # The authority is tenant-specific rather than /common because the app
+    # registration is single-tenant.
+    n["ClientServicesCredentialType"] = "AccessControlService"
+    n["AadApplicationId"] = aad_app_id
+    n["AadAuthorityUri"] = f"https://login.microsoftonline.com/{aad_tenant_id}"
+    # BC 25+ asks Entra for a token with this audience and hands it to the NST,
+    # which must list the same value in ValidAudiences. BcContainerHelper sets
+    # the pair together (New-NavContainer.ps1:1422); without it the tier falls
+    # back to validating the connection as a username/password.
+    n["AadValidAudience"] = "https://api.businesscentral.dynamics.com"
+else:
+    n["ClientServicesCredentialType"] = "NavUserPassword"
 n["RequireSsl"] = require_ssl
 n["ServerHttps"] = False
 n["AuthenticateServer"] = "false"
@@ -127,5 +153,8 @@ exec env \
     DOTNET_TieredCompilation=0 \
     DOTNET_SYSTEM_GLOBALIZATION_USENLS=0 \
     HTTPSYS_STUB_INJECT_IDENTITY=0 \
-    ASPNETCORE_URLS="http://0.0.0.0:$PORT" \
+    HTTPSYS_STUB_FORWARDED_HEADERS="${BC_WEBCLIENT_FORWARDED_HEADERS:-0}" \
+    HTTPSYS_STUB_HTTPS_PFX="$HTTPS_PFX" \
+    HTTPSYS_STUB_HTTPS_PFX_PASSWORD="$HTTPS_PFX_PASSWORD" \
+    ASPNETCORE_URLS="$([ -n "$HTTPS_PFX" ] && echo https || echo http)://0.0.0.0:$PORT" \
     dotnet Prod.Client.WebCoreApp.dll

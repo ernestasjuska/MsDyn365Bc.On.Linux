@@ -1,0 +1,18 @@
+# Traefik dynamic configuration for the BC web client.
+#
+# Only the backend transport lives here; routers and the public hostname come
+# from labels on the bc service, so they can be interpolated from the shell.
+#
+# The BC container serves TLS itself (BC_WEBCLIENT_HTTPS_PFX), so Traefik opens a
+# second TLS connection to it rather than forwarding cleartext. That is what lets
+# the web client see the real scheme natively instead of inferring it from
+# X-Forwarded-Proto, which is what OAuth redirect URIs and Secure cookies depend
+# on. serverName is the compose service name because the certificate carries
+# DNS:bc, which keeps this file free of environment-specific values, and rootCAs
+# means the certificate is actually validated rather than skipped.
+http:
+  serversTransports:
+    bc-transport:
+      serverName: bc
+      rootCAs:
+        - /certs/ca.crt

@@ -7,6 +7,8 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Microsoft.AspNetCore.Server.HttpSys
@@ -66,6 +68,28 @@ namespace Microsoft.AspNetCore.Hosting
                 k.AllowSynchronousIO = opts.AllowSynchronousIO;
                 if (opts.MaxRequestBodySize.HasValue)
                     k.Limits.MaxRequestBodySize = opts.MaxRequestBodySize;
+
+                // Serve TLS directly when a certificate is supplied, so an https://
+                // binding in hosting.json works. Kestrel would otherwise reach for the
+                // dotnet developer certificate and abort with "Unable to configure HTTPS
+                // endpoint". The ASPNETCORE_Kestrel__Certificates__* configuration path
+                // is not an option here: BC builds its host without binding that section.
+                //
+                // This is what lets a proxy re-terminate TLS at the container instead of
+                // forwarding plain HTTP, which in turn means the app sees the real scheme
+                // natively rather than inferring it from X-Forwarded-Proto.
+                var pfx = Environment.GetEnvironmentVariable("HTTPSYS_STUB_HTTPS_PFX");
+                if (!string.IsNullOrEmpty(pfx) && System.IO.File.Exists(pfx))
+                {
+                    var pwd = Environment.GetEnvironmentVariable("HTTPSYS_STUB_HTTPS_PFX_PASSWORD") ?? string.Empty;
+#if NET9_0_OR_GREATER
+                    var cert = X509CertificateLoader.LoadPkcs12FromFile(pfx, pwd);
+#else
+                    var cert = new X509Certificate2(pfx, pwd);
+#endif
+                    k.ConfigureHttpsDefaults(h => h.ServerCertificate = cert);
+                    Console.WriteLine($"[HttpSysStub] HTTPS certificate loaded from {pfx} (subject {cert.Subject})");
+                }
             });
 
             builder.ConfigureServices(services =>
@@ -97,6 +121,13 @@ namespace Microsoft.AspNetCore.Hosting
             _boundPorts = boundPorts;
         }
 
+        private static string First(string headerValue)
+        {
+            if (string.IsNullOrEmpty(headerValue)) return string.Empty;
+            var comma = headerValue.IndexOf(',');
+            return (comma >= 0 ? headerValue.Substring(0, comma) : headerValue).Trim();
+        }
+
         public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
         {
             return app =>
@@ -119,6 +150,44 @@ namespace Microsoft.AspNetCore.Hosting
                             Console.WriteLine($"[HttpSysStub] {addr} → {stripped}");
                         }
                     }
+                }
+
+                // Rebuild the request's origin from the forwarded headers a
+                // TLS-terminating proxy sets, so absolute URLs the app generates
+                // (the OIDC redirect_uri above all) name the public address
+                // rather than the one Kestrel is bound to. The devtunnel relay
+                // rewrites Host to "localhost:<port>" whatever its --host-header
+                // setting says, so X-Forwarded-Host is the only place the
+                // external hostname survives the hop. Opt-in: the NST has no
+                // proxy in front of it and must keep trusting its own address.
+                if (Environment.GetEnvironmentVariable("HTTPSYS_STUB_FORWARDED_HEADERS") == "1")
+                {
+                    app.Use(async (context, nextMiddleware) =>
+                    {
+                        var headers = context.Request.Headers;
+                        var proto = First(headers["X-Forwarded-Proto"].ToString());
+                        if (!string.IsNullOrEmpty(proto))
+                            context.Request.Scheme = proto;
+
+                        var host = First(headers["X-Forwarded-Host"].ToString());
+                        if (!string.IsNullOrEmpty(host))
+                        {
+                            // X-Forwarded-Port carries the public port. Append it
+                            // only when it is not the default for the scheme and
+                            // the host does not already spell it out, or the
+                            // redirect_uri stops matching the registered one.
+                            var port = First(headers["X-Forwarded-Port"].ToString());
+                            if (!host.Contains(':') && !string.IsNullOrEmpty(port) &&
+                                !(proto == "https" && port == "443") &&
+                                !(proto == "http" && port == "80"))
+                            {
+                                host = host + ":" + port;
+                            }
+                            context.Request.Host = new HostString(host);
+                        }
+
+                        await nextMiddleware();
+                    });
                 }
 
                 if (!string.IsNullOrEmpty(pathBase))
