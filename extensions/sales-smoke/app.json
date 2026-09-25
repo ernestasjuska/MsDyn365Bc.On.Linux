@@ -1,0 +1,14 @@
+{
+  "id": "e5ea758d-58c7-4877-a0b0-42a44d0f3662",
+  "name": "BCL Sales Smoke",
+  "publisher": "BcOnLinux",
+  "version": "1.0.0.0",
+  "brief": "Creates and posts a sales order, exposed as an OData V4 unbound action.",
+  "runtime": "17.0",
+  "target": "OnPrem",
+  "platform": "28.0.0.0",
+  "application": "28.0.0.0",
+  "idRanges": [
+    { "from": 50100, "to": 50109 }
+  ]
+}
