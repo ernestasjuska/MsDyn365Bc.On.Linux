@@ -7,6 +7,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Microsoft.AspNetCore.Server.HttpSys
@@ -97,6 +98,13 @@ namespace Microsoft.AspNetCore.Hosting
             _boundPorts = boundPorts;
         }
 
+        private static string First(string headerValue)
+        {
+            if (string.IsNullOrEmpty(headerValue)) return string.Empty;
+            var comma = headerValue.IndexOf(',');
+            return (comma >= 0 ? headerValue.Substring(0, comma) : headerValue).Trim();
+        }
+
         public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
         {
             return app =>
@@ -119,6 +127,38 @@ namespace Microsoft.AspNetCore.Hosting
                             Console.WriteLine($"[HttpSysStub] {addr} → {stripped}");
                         }
                     }
+                }
+
+                // Preserve the public origin when a trusted relay forwards HTTPS as HTTP.
+                // Opt-in for the web client; leave NST request handling unchanged.
+                if (Environment.GetEnvironmentVariable("HTTPSYS_STUB_FORWARDED_HEADERS") == "1")
+                {
+                    app.Use(async (context, nextMiddleware) =>
+                    {
+                        var headers = context.Request.Headers;
+                        var proto = First(headers["X-Forwarded-Proto"].ToString());
+                        if (!string.IsNullOrEmpty(proto))
+                            context.Request.Scheme = proto;
+
+                        var host = First(headers["X-Forwarded-Host"].ToString());
+                        if (!string.IsNullOrEmpty(host))
+                        {
+                            // X-Forwarded-Port carries the public port. Append it
+                            // only when it is not the default for the scheme and
+                            // the host does not already spell it out, or the
+                            // redirect_uri stops matching the registered one.
+                            var port = First(headers["X-Forwarded-Port"].ToString());
+                            if (!host.Contains(':') && !string.IsNullOrEmpty(port) &&
+                                !(proto == "https" && port == "443") &&
+                                !(proto == "http" && port == "80"))
+                            {
+                                host = host + ":" + port;
+                            }
+                            context.Request.Host = new HostString(host);
+                        }
+
+                        await nextMiddleware();
+                    });
                 }
 
                 if (!string.IsNullOrEmpty(pathBase))
