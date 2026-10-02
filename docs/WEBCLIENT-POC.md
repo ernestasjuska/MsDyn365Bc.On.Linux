@@ -71,21 +71,27 @@ has no effect on the NST or on `BC_WEBCLIENT=0`.
 
 ### TLS terminated by the proxy
 
-Set `BC_WEBCLIENT_REQUIRE_SSL=1` when that reverse proxy also terminates TLS.
-The web client speaks plain HTTP and builds its redirects from its own scheme,
-so without it the sign-in redirect comes back as
-`Location: http://<public-host>:<port>/SignIn?...`. The browser then follows
-that in cleartext against a TLS-only port and the request is reset
-(`ERR_CONNECTION_RESET`). The flag flips `RequireSsl` in `navsettings.json`, so
-BC emits `https://` and marks its session cookies `Secure`. It does not change
-how the client reaches the NST - that hop stays plain `ws://localhost:7085`
-(`ServerHttps` is unaffected). Leave it unset for direct `http://localhost`
-access.
+Set `BC_WEBCLIENT_FORWARDED_HEADERS=1` when a trusted proxy or DevTunnel
+terminates public HTTPS and forwards HTTP to the web client. This reconstructs
+the request's scheme and host from `X-Forwarded-Proto`, `X-Forwarded-Host`, and
+a non-default `X-Forwarded-Port`, so absolute redirects use the public origin.
+It is disabled by default and applies only to the web-client process.
+
+Set `BC_WEBCLIENT_PUBLIC_URL` to the browser's public URL, including any path
+prefix or non-default public port. DevTunnel's public hostname may already
+identify the forwarded port; do not append the internal port to that URL.
 
 ```bash
-BC_WEBCLIENT=1 BC_WEBCLIENT_PATHBASE=/my-tier BC_WEBCLIENT_REQUIRE_SSL=1 \
-  docker compose up -d --wait
+BC_WEBCLIENT=1 BC_WEBCLIENT_FORWARDED_HEADERS=1 \
+  BC_WEBCLIENT_PUBLIC_URL=https://<public-host>/ docker compose up -d --wait
 ```
+
+`BC_WEBCLIENT_REQUIRE_SSL` controls BC's HTTPS requirement and cookie policy;
+it does not reconstruct the request scheme. Leave it false for direct HTTP.
+If enabled behind an HTTP relay, forwarded headers must supply the HTTPS scheme
+or antiforgery validation can fail. The NST connection remains plain
+`ws://localhost:7085` (`ServerHttps=false`). Trust forwarded headers only from
+the relay, with the backend listener private where possible.
 
 ## Architecture
 

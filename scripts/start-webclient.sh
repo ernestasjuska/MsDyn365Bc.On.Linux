@@ -35,12 +35,8 @@ if [ -n "$PATHBASE" ]; then
     PATHBASE="${PATHBASE%/}"
 fi
 
-# Optional: tell the web client it is reached over HTTPS even though it speaks
-# plain HTTP itself. Needed when TLS is terminated by a reverse proxy in front
-# of the container: without it the client builds its redirects from its own
-# scheme and emits "Location: http://<public-host>/SignIn", which the browser
-# then follows in cleartext against a TLS-only port. Also makes BC mark its
-# session cookies Secure. Off by default (direct http://localhost access).
+# RequireSsl controls BC's HTTPS requirement/cookie policy; forwarded-header
+# handling supplies the public scheme when a trusted relay forwards HTTP.
 REQUIRE_SSL="${BC_WEBCLIENT_REQUIRE_SSL:-false}"
 case "$REQUIRE_SSL" in
     1|true|True|TRUE|yes) REQUIRE_SSL="true" ;;
@@ -127,5 +123,6 @@ exec env \
     DOTNET_TieredCompilation=0 \
     DOTNET_SYSTEM_GLOBALIZATION_USENLS=0 \
     HTTPSYS_STUB_INJECT_IDENTITY=0 \
+    HTTPSYS_STUB_FORWARDED_HEADERS="${BC_WEBCLIENT_FORWARDED_HEADERS:-0}" \
     ASPNETCORE_URLS="http://0.0.0.0:$PORT" \
     dotnet Prod.Client.WebCoreApp.dll

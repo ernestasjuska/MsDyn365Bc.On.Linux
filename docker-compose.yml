@@ -176,10 +176,15 @@ services:
       # Reused for both Kestrel's bound URL and PublicWebBaseUrl. See
       # docs/WEBCLIENT-POC.md.
       BC_WEBCLIENT_PATHBASE: ${BC_WEBCLIENT_PATHBASE:-}
-      # Set to 1 when a reverse proxy in front of the container terminates TLS,
-      # so the web client emits https:// in its redirects instead of http://.
+      # Require HTTPS for web requests/cookies. With HTTP forwarding, the
+      # forwarded-header option below must reconstruct the public HTTPS scheme.
       # See docs/WEBCLIENT-POC.md.
       BC_WEBCLIENT_REQUIRE_SSL: ${BC_WEBCLIENT_REQUIRE_SSL:-}
+      # Public URL advertised by the NST.
+      BC_WEBCLIENT_PUBLIC_URL: ${BC_WEBCLIENT_PUBLIC_URL:-}
+      # For DevTunnel forwarding HTTP: reconstruct the public scheme and host
+      # from X-Forwarded-*. Off by default for direct HTTP access.
+      BC_WEBCLIENT_FORWARDED_HEADERS: ${BC_WEBCLIENT_FORWARDED_HEADERS:-0}
       SQL_SERVER: sql
       # .NET runtime tuning. Defaults are inherited from the entrypoint
       # (gcServer=1, TieredCompilation=0). These pass-throughs let us A/B
