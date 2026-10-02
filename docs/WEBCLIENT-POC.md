@@ -93,6 +93,104 @@ or antiforgery validation can fail. The NST connection remains plain
 `ws://localhost:7085` (`ServerHttps=false`). Trust forwarded headers only from
 the relay, with the backend listener private where possible.
 
+## Entra ID sign-in
+
+Working, and the split is the whole trick: **the NST stays on
+`NavUserPassword`; only the web client is `AccessControlService`.** Moving the
+tier to `AccessControlService` breaks the container healthcheck (it does basic
+auth against OData) and the AL toolkit publish (HTTP 401). The web client
+validates the Entra token itself, then opens its client-services session over
+7085 exactly as before — `ClientServicesUserNamePasswordValidator` on the tier
+delegates to `WSFederationValidator`, so NavUserPassword and Entra are not the
+alternatives they look like.
+
+This is the second change in the stack. Configure public HTTPS forwarding using
+[TLS terminated by the proxy](#tls-terminated-by-the-proxy) first;
+that setup works independently with NavUserPassword.
+
+Add these Entra-specific values to `.env`:
+
+```bash
+BC_AAD_APP_ID=<app id>
+BC_AAD_TENANT_ID=<tenant id>
+# Optional: provision one demo BC user with SUPER permissions.
+BC_AAD_USER_UPN=<the token's email claim>
+# Optional override for the BC username derived from that email.
+BC_AAD_USER_NAME=
+```
+
+Register the public application's `/SignIn` and `/OAuthLanding.htm` callbacks
+in Entra, including `BC_WEBCLIENT_PATHBASE` when set. Recreate the BC service
+with the new settings. The relay must admit the callback POST before BC can
+process it; configure anonymous relay access when using DevTunnel.
+
+`BC_AAD_USER_UPN` is a provisioning convenience, not an Entra protocol setting or
+login restriction. It creates a BC user with Authentication Email set to this
+value and grants SUPER. Omit it when users and their authentication mappings are
+already provisioned. Entra authenticates the identity; BC still needs a user and
+permission sets. The variable does not select which account Microsoft signs in.
+
+### Validation
+
+The BC 30 demo used the same Entra code and HttpSys stub as this PR, combined
+with upstream commit `2e18c96e45c5dcb59f6a71f7d927a476831be39a` for BC 30/.NET 10
+support. The browser authorization request used the configured tenant and app,
+`response_type=code id_token`, and the public HTTPS `/SignIn` callback. The user
+confirmed completing sign-in and reaching the CRONUS role center through a tunnel
+forwarding directly to HTTP, without Traefik or backend TLS.
+
+Separately, an Entra bearer token for the BC API audience returned HTTP 200 from
+OData; a token with a corrupted signature returned 401; local basic credentials
+still returned 200. That bearer check used an Azure CLI token, not an ID token
+issued to the web-client app, so it verifies the NST token path separately from
+the user-confirmed browser callback.
+
+### Pitfalls, each of which cost a debugging cycle
+
+- **`BC_AAD_USER_UPN` is the token's `email` claim, not the directory UPN.**
+  A personal Microsoft account federated into the tenant signs in with
+  `idp: live.com`, and its token carries `email=user@gmail.com` while the
+  directory UPN is `user@tenant.onmicrosoft.com`. BC matches the token to a
+  row in `[User]` by `[Authentication Email]`, so the directory UPN silently
+  matches nothing. Symptom: sign-in completes at Microsoft and BC still
+  rejects you.
+- **Only one BC user may carry a given `[Authentication Email]`.** The
+  entrypoint derives the user name from the local part of
+  `BC_AAD_USER_UPN` (`user@gmail.com` → `USER`) and guards on
+  `IF NOT EXISTS ([User Name])`, not on the email — so a second hand-made row
+  with the same email collides. Leave `[Authentication Object ID]` empty; BC
+  writes it on first successful sign-in.
+- **`ADOpenIdMetadataLocation` must be set.** Empty produces the opaque
+  "You cannot sign in due to a technical issue" page after a successful
+  Microsoft round-trip.
+- **`PublicWebBaseUrl` must match the public origin and path.** Include a
+  non-default port when the browser uses one; omit internal forwarded ports.
+  BC uses this configuration for session origin validation and advertised URLs.
+- **DataProtection keys are not persisted.** Any `bc` recreate invalidates
+  auth and antiforgery cookies — sign in again.
+
+### App registration
+
+Single-tenant, `requestedAccessTokenVersion: 2`, `isFallbackPublicClient: true`,
+both implicit-grant boxes on (BC uses `response_type=code id_token` with
+`response_mode=form_post`), `identifierUris: ["api://<app id>"]` — a bare
+`api://<app id>` with no trailing slash, or Entra rejects it with
+`IdentifierUrisEndsWithSlash`, and anything on an unverified domain fails with
+`HostNameNotOnVerifiedDomain`. Redirect URIs must list **both** `/SignIn` and
+`/OAuthLanding.htm` on the public host.
+
+Delegated permissions: `user_impersonation` and `Financials.ReadWrite.All` on
+the BC first-party app `996def3d-b36c-4153-8607-a6fd3c01b89f`, plus the Graph
+basics (`openid`, `profile`, `email`, `offline_access`, `User.Read`). If the BC
+service principal doesn't exist in the tenant yet, create it before granting
+consent. Don't add SharePoint or Power BI permissions unless those service
+principals exist in the tenant — admin consent fails for the whole app if any
+resource is missing.
+
+The BC API permissions matter only for calling the OData/API endpoints with a
+bearer token; **the web client works without them**, so a 401 from
+`/api/v2.0/companies` proves nothing about web-client sign-in.
+
 ## Architecture
 
 ```
